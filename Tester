@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Mini Minecraft Mobile — Single File (Local Chat)</title>
+<style>
+  html,body{margin:0;height:100%;width:100%;overflow:hidden;background:#87ceeb;font-family:Arial,Helvetica,sans-serif;touch-action:none}
+  canvas{display:block;width:100vw;height:100vh;background:linear-gradient(#87ceeb 0%, #cfefff 65%, #9bd16f 65%, #7cc65b 100%);image-rendering:pixelated}
+  #ui{position:fixed;top:10px;left:10px;color:#fff;text-shadow:0 2px 4px rgba(0,0,0,.6);z-index:10;pointer-events:none;font-size:14px}
+  #chatOpen{position:fixed;top:10px;right:10px;z-index:30;border:none;border-radius:14px;padding:10px 14px;background:rgba(0,0,0,.55);color:#fff;font-weight:700}
+  #controls{position:fixed;left:0;right:0;bottom:12px;display:flex;justify-content:space-between;align-items:flex-end;padding:0 12px;z-index:20;pointer-events:none;gap:8px}
+  .group{display:flex;gap:8px;pointer-events:auto}
+  .btn{width:64px;height:64px;border-radius:14px;border:none;background:rgba(0,0,0,.45);color:#fff;font-size:18px;font-weight:700;touch-action:none}
+  .btn:active{background:rgba(0,0,0,.75)}
+  .chat-popup{position:fixed;right:10px;top:60px;width:min(360px,calc(100vw - 20px));height:380px;background:rgba(18,18,18,.98);color:#fff;border-radius:14px;display:none;z-index:40;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+  .chat-header{padding:10px 12px;background:rgba(255,255,255,.04);display:flex;justify-content:space-between;align-items:center;font-weight:700}
+  #chatMessages{height:250px;overflow-y:auto;padding:10px 12px;font-size:14px;background:rgba(0,0,0,0.03)}
+  #chatForm{display:flex;gap:8px;padding:10px;background:rgba(255,255,255,.02)}
+  #chatInput{flex:1;padding:10px;border-radius:10px;border:none;outline:none}
+  #sendChat{padding:10px 14px;border-radius:10px;border:none;background:#2563eb;color:#fff;font-weight:700}
+  #closeChat{border:none;background:transparent;color:#fff;font-size:20px;font-weight:700}
+  /* small-screen tweaks */
+  @media (max-width:420px){
+    .btn{width:56px;height:56px}
+    #chatMessages{height:200px}
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div>Mini Minecraft Mobile — Local Chat</div>
+  <div>Move: ◀ ▶ • Jump: ⬆ • Fly: 🪽</div>
+  <div>Mine: ⛏ • Place: ⬛</div>
+</div>
+
+<button id="chatOpen">Chat</button>
+
+<canvas id="game"></canvas>
+
+<div id="controls">
+  <div class="group">
+    <button class="btn" id="left">◀</button>
+    <button class="btn" id="right">▶</button>
+    <button class="btn" id="jump">⬆</button>
+    <button class="btn" id="fly">🪽</button>
+  </div>
+  <div class="group">
+    <button class="btn" id="mine">⛏</button>
+    <button class="btn" id="place">⬛</button>
+  </div>
+</div>
+
+<div class="chat-popup" id="chatPopup" aria-hidden="true">
+  <div class="chat-header">
+    <span>Public Chat (local demo)</span>
+    <div>
+      <button id="clearLocal" title="Clear local chat" style="margin-right:8px;border:none;background:transparent;color:#fff">Clear</button>
+      <button id="closeChat">×</button>
+    </div>
+  </div>
+  <div id="chatMessages" role="log" aria-live="polite"></div>
+  <form id="chatForm">
+    <input id="chatInput" type="text" placeholder="Type a message or /help" autocomplete="off" />
+    <button id="sendChat" type="submit">Send</button>
+  </form>
+</div>
+
+<script>
+/*
+ Single-file game + local chat client.
+ - Local chat: messages stay in this browser session only.
+ - Use the commented Socket.IO section at the bottom to enable real multi-user chat by adding a server.
+*/
+
+/* --- Canvas & world setup --- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+function resize(){
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = Math.floor(w * DPR);
+  canvas.height = Math.floor(h * DPR);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const blockSize = 40;
+const cols = 280;
+const rows = 48;
+const world = Array.from({length: rows}, () => Array(cols).fill(0));
+
+// generate terrain
+for (let x = 0; x < cols; x++) {
+  const base = 22 + Math.floor(Math.sin(x/11)*2 + Math.sin(x/29)*3);
+  for (let y = base; y < rows; y++) world[y][x] = 1;           // dirt
+  if (base - 1 >= 0) world[base - 1][x] = 2;                   // grass
+  if (base - 2 >= 0 && x % 11 === 0) world[base - 2][x] = 3;   // stone patches
+}
+
+const player = { x: 300, y: 60, w: 28, h: 38, vx:0, vy:0, speed:3, jumpPower:11, onGround:false, selectedBlock:1, flying:false };
+const mobs = Array.from({length:18}, (_,i) => ({ x: 900 + i*260, y: 10 + (i%5)*8, w:28, h:30, vx: i%2===0?1.1:-1.1, vy:0, onGround:false, timer:0 }));
+const keys = { left:false, right:false, jump:false, mine:false, place:false, fly:false };
+
+/* helpers */
+function isSolid(tx,ty){ return !(ty<0||ty>=rows||tx<0||tx>=cols) && world[ty][tx] !== 0; }
+function collideRect(x,y,w,h){ const left=Math.floor(x/blockSize), right=Math.floor((x+w-1)/blockSize), top=Math.floor(y/blockSize), bottom=Math.floor((y+h-1)/blockSize); for(let ty=top;ty<=bottom;ty++) for(let tx=left;tx<=right;tx++) if(isSolid(tx,ty)) return true; return false; }
+function centeredCell(){ return { tx: Math.floor((player.x + player.w/2)/blockSize), ty: Math.floor((player.y + player.h/2)/blockSize) }; }
+
+/* mining / placing */
+function breakBlock(){
+  const {tx,ty} = centeredCell();
+  for (const [ox,oy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const x = tx+ox, y = ty+oy;
+    if (x>=0 && x<cols && y>=0 && y<rows && world[y][x] !== 0) { world[y][x] = 0; return; }
+  }
+}
+function placeBlock(){
+  const {tx,ty} = centeredCell();
+  for (const [ox,oy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const x = tx+ox, y = ty+oy;
+    if (x>=0 && x<cols && y>=0 && y<rows && world[y][x] === 0) {
+      const bx = x*blockSize, by = y*blockSize;
+      if (!collideRect(bx,by,blockSize,blockSize)) { world[y][x] = player.selectedBlock; return; }
+    }
+  }
+}
+
+/* player/mob update & draw */
+function updatePlayer(){
+  player.flying = keys.fly;
+  player.vx = keys.left ? -player.speed : keys.right ? player.speed : 0;
+
+  if (player.flying){
+    player.vy = 0;
+    if (keys.jump) player.y -= 4;
+    if (keys.mine) player.y += 4;
+  } else {
+    if (keys.jump && player.onGround) { player.vy = -player.jumpPower; player.onGround=false; }
+    player.vy += 0.5;
+  }
+
+  const nx = player.x + player.vx;
+  if (!collideRect(nx, player.y, player.w, player.h)) player.x = nx;
+  const ny = player.y + player.vy;
+  if (!collideRect(player.x, ny, player.w, player.h)) { player.y = ny; player.onGround=false; } 
+  else if (!player.flying) { if (player.vy>0) player.onGround=true; player.vy = 0; }
+
+  player.x = Math.max(0, Math.min(player.x, cols*blockSize - player.w));
+  player.y = Math.max(0, Math.min(player.y, rows*blockSize - player.h));
+
+  if (keys.mine) { breakBlock(); keys.mine = false; }
+  if (keys.place) { placeBlock(); keys.place = false; }
+}
+
+function updateMob(m){
+  m.timer++;
+  if (m.timer > 150){ m.vx *= -1; m.timer = 0; }
+  const dx = (player.x - m.x);
+  if (Math.abs(dx) < 140) m.vx = dx < 0 ? -1.4 : 1.4;
+
+  m.vy += 0.5;
+  const nx = m.x + m.vx;
+  if (!collideRect(nx, m.y, m.w, m.h)) m.x = nx; else m.vx *= -1;
+  const ny = m.y + m.vy;
+  if (!collideRect(m.x, ny, m.w, m.h)) { m.y = ny; m.onGround=false; } else { if (m.vy>0) m.onGround=true; m.vy=0; }
+
+  if (m.onGround && Math.random() < 0.008){ m.vy = -9; m.onGround=false; }
+  if (m.y > rows*blockSize){ m.x = 900 + Math.random()*3000; m.y = 0; }
+}
+
+function drawBlock(x,y,type){
+  ctx.fillStyle = type===1 ? '#8b5a2b' : type===2 ? '#3cb043' : '#777';
+  ctx.fillRect(x,y,blockSize,blockSize);
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.strokeRect(x,y,blockSize,blockSize);
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const camX = player.x - window.innerWidth/2 + player.w/2;
+  const camY = player.y - window.innerHeight/2 + player.h/2;
+
+  const startX = Math.max(0, Math.floor(camX / blockSize) - 2);
+  const endX   = Math.min(cols-1, Math.ceil((camX + window.innerWidth)/blockSize) + 2);
+  const startY = Math.max(0, Math.floor(camY / blockSize) - 2);
+  const endY   = Math.min(rows-1, Math.ceil((camY + window.innerHeight)/blockSize) + 2);
+
+  for (let y = startY; y <= endY; y++){
+    for (let x = startX; x <= endX; x++){
+      if (world[y][x] !== 0) drawBlock(x*blockSize - camX, y*blockSize - camY, world[y][x]);
+    }
+  }
+
+  // player
+  ctx.fillStyle = '#ffcc99'; ctx.fillRect(player.x - camX, player.y - camY, player.w, player.h);
+  ctx.fillStyle = '#333'; ctx.fillRect(player.x - camX + 6, player.y - camY + 10, 4, 4); ctx.fillRect(player.x - camX + 18, player.y - camY + 10, 4, 4);
+
+  // mobs
+  for (const m of mobs){ ctx.fillStyle = '#ff4d4d'; ctx.fillRect(m.x - camX, m.y - camY, m.w, m.h); }
+
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(10, window.innerHeight - 104, 360, 52);
+  ctx.fillStyle = '#fff'; ctx.font = '14px Arial';
+  ctx.fillText('Blocks: 1 dirt 2 grass 3 stone', 18, window.innerHeight - 82);
+  ctx.fillText('Selected: ' + player.selectedBlock + ' | Fly: ' + (player.flying ? 'ON' : 'OFF'), 18, window.innerHeight - 62);
+}
+
+function loop(){ updatePlayer(); mobs.forEach(updateMob); draw(); requestAnimationFrame(loop); }
+loop();
+
+/* --- mobile / keyboard controls binding --- */
+function bindHold(id, key){
+  const el = document.getElementById(id);
+  const on = e => { if(e) e.preventDefault(); keys[key] = true; };
+  const off = e => { if(e) e.preventDefault(); keys[key] = false; };
+  el.addEventListener('touchstart', on, {passive:false}); el.addEventListener('touchend', off, {passive:false}); el.addEventListener('touchcancel', off, {passive:false});
+  el.addEventListener('mousedown', on); el.addEventListener('mouseup', off); el.addEventListener('mouseleave', off);
+}
+['left','right','jump','mine','place','fly'].forEach(k => bindHold(k,k));
+
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k==='a') keys.left = true;
+  if (k==='d') keys.right = true;
+  if (e.key === ' ' || k==='w') keys.jump = true;
+  if (k==='f') keys.fly = true;
+  if (k==='q') keys.mine = true;
+  if (k==='e') keys.place = true;
+  if (e.key==='1') player.selectedBlock = 1;
+  if (e.key==='2') player.selectedBlock = 2;
+  if (e.key==='3') player.selectedBlock = 3;
+});
+window.addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if (k==='a') keys.left = false;
+  if (k==='d') keys.right = false;
+  if (e.key === ' ' || k==='w') keys.jump = false;
+  if (k==='f') keys.fly = false;
+  if (k==='q') keys.mine = false;
+  if (k==='e') keys.place = false;
+});
+
+/* --- Local chat (single-browser demo) --- */
+const chatOpen = document.getElementById('chatOpen');
+const chatPopup = document.getElementById('chatPopup');
+const closeChat = document.getElementById('closeChat');
+const chatForm = document.getElementById('chatForm');
+const chatInput = document.getElementById('chatInput');
+const chatMessages = document.getElementById('chatMessages');
+const clearLocal = document.getElementById('clearLocal');
+
+let localMessages = []; // stored in-memory for this page
+let myName = localStorage.getItem('mini_name') || '';
+
+if (!myName) {
+  myName = prompt('Enter display name for local chat (this is local only):') || 'Guest';
+  localStorage.setItem('mini_name', myName);
+}
+
+function renderLocalMessages(){
+  chatMessages.innerHTML = '';
+  localMessages.slice(-200).forEach(m => {
+    const div = document.createElement('div');
+    div.textContent = `[${m.time}] ${m.user}: ${m.text}`;
+    chatMessages.appendChild(div);
+  });
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function pushLocalMessage(user, text){
+  const time = new Date().toLocaleTimeString();
+  localMessages.push({ user, text, time });
+  renderLocalMessages();
+}
+
+/* commands support (local) */
+function handleLocalCommand(text){
+  const parts = text.slice(1).split(' ');
+  const cmd = parts[0].toLowerCase();
+  const args = parts.slice(1).join(' ');
+  if (cmd === 'help') {
+    pushLocalMessage('System', 'Commands (local): /help, /me text, /clear, /name NEWNAME');
+    return true;
+  }
+  if (cmd === 'me') {
+    pushLocalMessage('* ' + myName, args || 'does something');
+    return true;
+  }
+  if (cmd === 'clear') {
+    localMessages = [];
+    renderLocalMessages();
+    pushLocalMessage('System', myName + ' cleared local chat');
+    return true;
+  }
+  if (cmd === 'name') {
+    if (args) { myName = args; localStorage.setItem('mini_name', myName); pushLocalMessage('System', 'Name changed to ' + myName); } else pushLocalMessage('System', 'Usage: /name NEWNAME');
+    return true;
+  }
+  return false;
+}
+
+chatOpen.onclick = () => { chatPopup.style.display = 'block'; chatPopup.setAttribute('aria-hidden','false'); renderLocalMessages(); chatInput.focus(); };
+closeChat.onclick = () => { chatPopup.style.display = 'none'; chatPopup.setAttribute('aria-hidden','true'); };
+clearLocal.onclick = () => { localMessages = []; renderLocalMessages(); };
+
+chatForm.addEventListener('submit', e => {
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  if (text.startsWith('/')) {
+    if (!handleLocalCommand(text)) pushLocalMessage('System', 'Unknown local command. Type /help');
+  } else {
+    pushLocalMessage(myName, text);
+  }
+  chatInput.value = '';
+});
+
+/* --- OPTIONAL: Hook up real multi-user chat (server required) ---
+If you deploy a server (see earlier server.js using Socket.IO), you can enable real-time chat.
+Uncomment the script tag below and the code block, then host this page under the same origin
+as your Socket.IO server (or set CORS and change the io() URL).
+
+1) Add socket.io server (server.js from earlier answer).
+2) Serve this file from the server's public/ folder.
+3) Uncomment the client block below.
+
+<!--
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io(); // or io('https://your-server.com')
+  socket.on('chat history', history => { localMessages = history; renderLocalMessages(); });
+  socket.on('chat message', m => { localMessages.push(m); renderLocalMessages(); });
+  socket.on('chat cleared', () => { localMessages = []; renderLocalMessages(); });
+
+  // when user opens page, join
+  socket.emit('join', myName);
+
+  // replace pushLocalMessage calls for sending:
+  // on chat submit: socket.emit('chat message', { text });
+  // server will broadcast to all clients.
+</script>
+-->
+
+*/
+
+/* End of single-file app */
+</script>
+
+</body>
+</html>
